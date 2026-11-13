@@ -5,6 +5,14 @@ All notable changes to `initred/laravel-langfuse` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-11-13
+
+### Fixed
+
+- Packagist kept the first build of `v1.0.0` after the tag was moved, so the
+  version installed from Packagist differed from the tagged commit. No code changes;
+  install 1.0.1 to get the same code from GitHub and Packagist.
+
 ## [1.0.0] - 2026-11-13
 
 First release. Based on [axyr/laravel-langfuse](https://github.com/axyr/laravel-langfuse)
