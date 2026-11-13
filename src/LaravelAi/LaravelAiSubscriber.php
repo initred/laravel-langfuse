@@ -1,0 +1,294 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Initred\Langfuse\LaravelAi;
+
+use Closure;
+use DateTimeImmutable;
+use DateTimeZone;
+use Initred\Langfuse\Config\LangfuseConfig;
+use Initred\Langfuse\Contracts\LangfuseClientInterface;
+use Initred\Langfuse\Contracts\PromptInterface;
+use Initred\Langfuse\Dto\GenerationBody;
+use Initred\Langfuse\Dto\SpanBody;
+use Initred\Langfuse\Dto\TraceBody;
+use Initred\Langfuse\Dto\Usage;
+use Initred\Langfuse\Enums\ObservationType;
+use Initred\Langfuse\Objects\LangfuseSpan;
+use Initred\Langfuse\Objects\LangfuseTrace;
+use Initred\Langfuse\Objects\NullLangfuseTrace;
+use Initred\Langfuse\Prompt\CurrentPromptRegistry;
+use Laravel\Ai\Events\AgentPrompted;
+use Laravel\Ai\Events\AgentStreamed;
+use Laravel\Ai\Events\InvokingTool;
+use Laravel\Ai\Events\PromptingAgent;
+use Laravel\Ai\Events\StreamingAgent;
+use Laravel\Ai\Events\ToolInvoked;
+use Laravel\Ai\Responses\Data\TextUsage;
+
+class LaravelAiSubscriber
+{
+    /** @var array<string, float> */
+    private array $startTimes = [];
+
+    /** @var array<string, LangfuseTrace> */
+    private array $traces = [];
+
+    /** @var array<string, true> Invocations whose trace this subscriber created itself. */
+    private array $ownedInvocations = [];
+
+    /** @var array<string, LangfuseSpan> */
+    private array $toolSpans = [];
+
+    /** @var array<string, float> */
+    private array $toolStartTimes = [];
+
+    /** @var array<string, PromptInterface> */
+    private array $managedPrompts = [];
+
+    public function __construct(
+        private readonly LangfuseClientInterface $langfuse,
+        private readonly LangfuseConfig $config,
+        private readonly CurrentPromptRegistry $prompts = new CurrentPromptRegistry,
+    ) {}
+
+    public function handlePromptingAgent(PromptingAgent $event): void
+    {
+        $this->startTimes[$event->invocationId] = microtime(true);
+
+        // Capture the prompt resolved before this invocation right away, so prompts
+        // resolved by tools or nested agents during the run cannot replace it.
+        $managedPrompt = $this->prompts->consume();
+
+        if ($managedPrompt !== null) {
+            $this->managedPrompts[$event->invocationId] = $managedPrompt;
+        }
+
+        $this->resolveTrace($event->invocationId, fn (): TraceBody => $this->traceBodyFor($event));
+    }
+
+    public function handleAgentPrompted(AgentPrompted $event): void
+    {
+        $startTime = $this->startTimes[$event->invocationId] ?? microtime(true);
+        $endTime = microtime(true);
+
+        $trace = $this->resolveTrace($event->invocationId, fn (): TraceBody => $this->traceBodyFor($event));
+
+        $this->recordGeneration($trace, $event, $startTime, $endTime);
+        $this->completeTrace($trace, $event);
+
+        unset($this->startTimes[$event->invocationId], $this->managedPrompts[$event->invocationId]);
+    }
+
+    private function recordGeneration(LangfuseTrace $trace, AgentPrompted $event, float $startTime, float $endTime): void
+    {
+        $response = $event->response;
+        $model = $response->meta->model ?? $event->prompt->model;
+
+        $body = new GenerationBody(
+            name: $model,
+            model: $model,
+            input: $event->prompt->prompt,
+            startTime: $this->formatTime($startTime),
+        );
+
+        $generation = $trace->generation(
+            $body->withPrompt($this->managedPrompts[$event->invocationId] ?? null),
+        );
+
+        $generation->end(
+            endTime: $this->formatTime($endTime),
+            output: $response->text,
+            usage: $this->mapUsage($response->usage),
+        );
+    }
+
+    public function handleInvokingTool(InvokingTool $event): void
+    {
+        $this->toolStartTimes[$event->toolInvocationId] = microtime(true);
+
+        $trace = $this->resolveTrace($event->invocationId, fn (): TraceBody => new TraceBody(
+            name: 'laravel-ai-'.$this->getShortClassName($event->agent),
+            metadata: ['source' => 'laravel-ai-auto-instrumentation'],
+        ));
+        $toolName = $this->getShortClassName($event->tool);
+
+        $span = $trace->span(new SpanBody(
+            name: "tool-{$toolName}",
+            startTime: $this->formatTime($this->toolStartTimes[$event->toolInvocationId]),
+            input: $event->arguments,
+            type: ObservationType::Tool,
+        ));
+
+        $this->toolSpans[$event->toolInvocationId] = $span;
+    }
+
+    public function handleToolInvoked(ToolInvoked $event): void
+    {
+        $span = $this->toolSpans[$event->toolInvocationId] ?? null;
+
+        if ($span === null) {
+            return;
+        }
+
+        $span->end(
+            endTime: $this->formatTime(microtime(true)),
+            output: $event->result,
+        );
+
+        unset($this->toolSpans[$event->toolInvocationId], $this->toolStartTimes[$event->toolInvocationId]);
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function subscribe(): array
+    {
+        return [
+            PromptingAgent::class => 'handlePromptingAgent',
+            StreamingAgent::class => 'handlePromptingAgent',
+            AgentPrompted::class => 'handleAgentPrompted',
+            AgentStreamed::class => 'handleAgentPrompted',
+            InvokingTool::class => 'handleInvokingTool',
+            ToolInvoked::class => 'handleToolInvoked',
+        ];
+    }
+
+    private function traceBodyFor(PromptingAgent|AgentPrompted $event): TraceBody
+    {
+        $context = $this->contextFor($event->prompt->agent);
+
+        return new TraceBody(
+            name: 'laravel-ai-'.$this->getShortClassName($event->prompt->agent),
+            userId: $context->userId,
+            sessionId: $context->sessionId,
+            input: $event->prompt->prompt,
+            metadata: [
+                'model' => $event->prompt->model,
+                'source' => 'laravel-ai-auto-instrumentation',
+            ],
+        );
+    }
+
+    /**
+     * Completes the trace once the run is done. The response text becomes the
+     * trace output only for traces this subscriber created, so a request trace or
+     * a manual workflow trace keeps its own output. Session and user ids are sent
+     * for every trace, since a new conversation only gets its id after the run.
+     *
+     * A trace this subscriber owns is also ended here: in v4 the root
+     * observation is exported by `end()`. Adopted traces are left open for
+     * whoever owns them.
+     */
+    private function completeTrace(LangfuseTrace $trace, AgentPrompted $event): void
+    {
+        $owned = isset($this->ownedInvocations[$event->invocationId]);
+
+        $this->updateTrace($trace, $event, $owned);
+
+        if (! $owned) {
+            return;
+        }
+
+        $trace->end();
+
+        $this->langfuse->setCurrentTrace(new NullLangfuseTrace);
+
+        unset($this->traces[$event->invocationId], $this->ownedInvocations[$event->invocationId]);
+    }
+
+    private function updateTrace(LangfuseTrace $trace, AgentPrompted $event, bool $owned): void
+    {
+        $context = $this->contextFor($event->prompt->agent, $event->response);
+
+        if (! $owned && $context->isEmpty()) {
+            return;
+        }
+
+        $trace->update(new TraceBody(
+            userId: $context->userId,
+            sessionId: $context->sessionId,
+            output: $owned ? $event->response->text : null,
+        ));
+    }
+
+    private function contextFor(object $agent, ?object $response = null): ConversationContext
+    {
+        $context = $response === null
+            ? ConversationContext::fromAgent($agent)
+            : ConversationContext::fromResponse($response, $agent);
+
+        return $context->only(
+            session: $this->config->sessionTracingEnabled,
+            user: $this->config->userTracingEnabled,
+        );
+    }
+
+    /**
+     * @param  Closure(): TraceBody  $body  Built only when a trace actually has to be created.
+     */
+    private function resolveTrace(string $invocationId, Closure $body): LangfuseTrace
+    {
+        if (isset($this->traces[$invocationId])) {
+            return $this->traces[$invocationId];
+        }
+
+        $existing = $this->langfuse->currentTrace();
+
+        if (! $existing instanceof NullLangfuseTrace) {
+            $this->traces[$invocationId] = $existing;
+
+            return $existing;
+        }
+
+        $trace = $this->langfuse->trace($body());
+        $this->langfuse->setCurrentTrace($trace);
+        $this->traces[$invocationId] = $trace;
+        $this->ownedInvocations[$invocationId] = true;
+
+        return $trace;
+    }
+
+    private function getShortClassName(object $object): string
+    {
+        $className = get_class($object);
+        $parts = explode('\\', $className);
+
+        return end($parts);
+    }
+
+    /**
+     * Langfuse counts every token in exactly one usage key and prices each key on its
+     * own, while laravel/ai's input count includes the tokens read from and written to
+     * a prompt cache. The cached tokens therefore move out of `input` into their own
+     * keys, named after the ones Langfuse maps OpenAI's cache details to. Reasoning
+     * tokens stay inside `output`: providers bill them at the output rate, and a
+     * separate key would be left unpriced by most model definitions.
+     */
+    private function mapUsage(TextUsage $usage): Usage
+    {
+        $details = array_filter([
+            'input_cached_tokens' => $usage->cacheReadInputTokens,
+            'input_cache_creation_tokens' => $usage->cacheWriteInputTokens,
+        ], fn (?int $tokens): bool => $tokens !== null && $tokens > 0);
+
+        return new Usage(
+            input: $usage->uncachedInputTokens(),
+            output: $usage->outputTokens,
+            total: $usage->inputTokens + $usage->outputTokens,
+            details: $details === [] ? null : $details,
+        );
+    }
+
+    private function formatTime(float $microtime): string
+    {
+        $dt = DateTimeImmutable::createFromFormat('U.u', sprintf('%.6f', $microtime));
+
+        if ($dt === false) {
+            return now()->toIso8601ZuluString();
+        }
+
+        return $dt->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d\TH:i:s.u\Z');
+    }
+}

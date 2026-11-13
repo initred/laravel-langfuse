@@ -1,0 +1,99 @@
+{
+    "name": "initred/laravel-langfuse",
+    "description": "Langfuse PHP SDK for Laravel, built for the Laravel AI SDK",
+    "type": "library",
+    "require": {
+        "php": "^8.5",
+        "laravel/framework": "^13.0"
+    },
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "initred",
+            "homepage": "https://github.com/initred"
+        }
+    ],
+    "autoload": {
+        "psr-4": {
+            "Initred\\Langfuse\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
+        }
+    },
+    "require-dev": {
+        "larastan/larastan": "^3.15",
+        "laravel/ai": "^1.4",
+        "laravel/pao": "^1.1.5",
+        "laravel/pint": "^1.32.3",
+        "neuron-core/neuron-ai": "^4.1.18",
+        "orchestra/testbench": "^11.3",
+        "paragonie/random_compat": "^9.99.100",
+        "pestphp/pest": "^5.3.5",
+        "pestphp/pest-plugin-laravel": "^5.0.1",
+        "pestphp/pest-plugin-type-coverage": "^5.1",
+        "phpdocumentor/reflection-docblock": "^5.6.3|^6.0",
+        "phpstan/extension-installer": "^1.4.3"
+    },
+    "conflict": {
+        "neuron-core/neuron-ai": ">=4.0 <4.1.18"
+    },
+    "suggest": {
+        "laravel/ai": "Required for automatic Laravel AI SDK tracing (^1.4)",
+        "neuron-core/neuron-ai": "Required for automatic Neuron AI agent tracing (^4.1.18)"
+    },
+    "scripts": {
+        "post-autoload-dump": [
+            "@clear",
+            "@prepare"
+        ],
+        "prepare": [
+            "@php vendor/bin/testbench package:discover --ansi"
+        ],
+        "lint": [
+            "vendor/bin/pint --parallel"
+        ],
+        "lint:check": [
+            "vendor/bin/pint --parallel --test"
+        ],
+        "analyse": [
+            "vendor/bin/phpstan analyse"
+        ],
+        "test:types": [
+            "vendor/bin/pest --type-coverage --min=100"
+        ],
+        "test:unit": [
+            "vendor/bin/pest"
+        ],
+        "test": [
+            "@analyse",
+            "@lint:check",
+            "@test:types",
+            "@test:unit"
+        ],
+        "clear": [
+            "@php vendor/bin/testbench package:purge-skeleton --ansi"
+        ]
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true,
+            "phpstan/extension-installer": true
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true,
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Initred\\Langfuse\\LangfuseServiceProvider"
+            ],
+            "aliases": {
+                "Langfuse": "Initred\\Langfuse\\LangfuseFacade"
+            }
+        }
+    }
+}

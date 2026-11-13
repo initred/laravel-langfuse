@@ -1,0 +1,261 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Initred\Langfuse;
+
+use Illuminate\Support\Facades\Log;
+use Initred\Langfuse\Config\LangfuseConfig;
+use Initred\Langfuse\Contracts\DatasetApiClientInterface;
+use Initred\Langfuse\Contracts\DatasetItemApiClientInterface;
+use Initred\Langfuse\Contracts\EventBatcherInterface;
+use Initred\Langfuse\Contracts\ExperimentApiClientInterface;
+use Initred\Langfuse\Contracts\LangfuseClientInterface;
+use Initred\Langfuse\Contracts\MetricsApiClientInterface;
+use Initred\Langfuse\Contracts\ObservationApiClientInterface;
+use Initred\Langfuse\Contracts\PromptApiClientInterface;
+use Initred\Langfuse\Contracts\PromptInterface;
+use Initred\Langfuse\Contracts\ScoreApiClientInterface;
+use Initred\Langfuse\Contracts\TraceContextResolverInterface;
+use Initred\Langfuse\Dto\CreateDatasetBody;
+use Initred\Langfuse\Dto\CreateDatasetItemBody;
+use Initred\Langfuse\Dto\CreatePromptBody;
+use Initred\Langfuse\Dto\DatasetItemListResponse;
+use Initred\Langfuse\Dto\DatasetItemQuery;
+use Initred\Langfuse\Dto\DatasetItemResponse;
+use Initred\Langfuse\Dto\DatasetListResponse;
+use Initred\Langfuse\Dto\DatasetResponse;
+use Initred\Langfuse\Dto\ExperimentItemListResponse;
+use Initred\Langfuse\Dto\ExperimentItemQuery;
+use Initred\Langfuse\Dto\ExperimentListResponse;
+use Initred\Langfuse\Dto\ExperimentQuery;
+use Initred\Langfuse\Dto\ExperimentResponse;
+use Initred\Langfuse\Dto\MetricQuery;
+use Initred\Langfuse\Dto\MetricsResponse;
+use Initred\Langfuse\Dto\ObservationListResponse;
+use Initred\Langfuse\Dto\ObservationQuery;
+use Initred\Langfuse\Dto\ObservationResponse;
+use Initred\Langfuse\Dto\PromptListResponse;
+use Initred\Langfuse\Dto\ScoreBody;
+use Initred\Langfuse\Dto\ScoreListResponse;
+use Initred\Langfuse\Dto\ScoreQuery;
+use Initred\Langfuse\Dto\ScoreResponse;
+use Initred\Langfuse\Dto\TraceBody;
+use Initred\Langfuse\Objects\LangfuseTrace;
+use Initred\Langfuse\Objects\NullLangfuseTrace;
+use Initred\Langfuse\Objects\OpenObservationRegistry;
+use Initred\Langfuse\Prompt\CurrentPromptRegistry;
+use Initred\Langfuse\Prompt\PromptManager;
+use Initred\Langfuse\Tracing\NullTraceContextResolver;
+use Throwable;
+
+class LangfuseClient implements LangfuseClientInterface
+{
+    private LangfuseTrace $currentTrace;
+
+    public function __construct(
+        private readonly EventBatcherInterface $batcher,
+        private readonly LangfuseConfig $config,
+        private readonly PromptManager $promptManager,
+        private readonly ScoreApiClientInterface $scoreApiClient,
+        private readonly PromptApiClientInterface $promptApiClient,
+        private readonly ObservationApiClientInterface $observationApiClient,
+        private readonly MetricsApiClientInterface $metricsApiClient,
+        private readonly DatasetApiClientInterface $datasetApiClient,
+        private readonly DatasetItemApiClientInterface $datasetItemApiClient,
+        private readonly ExperimentApiClientInterface $experimentApiClient,
+        private readonly OpenObservationRegistry $registry = new OpenObservationRegistry,
+        private readonly CurrentPromptRegistry $promptRegistry = new CurrentPromptRegistry,
+        private readonly TraceContextResolverInterface $contextResolver = new NullTraceContextResolver,
+    ) {
+        $this->currentTrace = new NullLangfuseTrace;
+    }
+
+    public function trace(TraceBody $body): LangfuseTrace
+    {
+        return new LangfuseTrace(
+            body: $this->applyTraceContext(
+                $body->withEnvironment($this->config->environment)->withRelease($this->config->release),
+            ),
+            batcher: $this->batcher,
+            registry: $this->registry,
+        );
+    }
+
+    /**
+     * Fills in userId and sessionId from the context resolver when the body does
+     * not set them. Resolver failures must never break the traced code path.
+     */
+    private function applyTraceContext(TraceBody $body): TraceBody
+    {
+        try {
+            return $body
+                ->withUserId($this->resolveDefaultUserId($body))
+                ->withSessionId($this->resolveDefaultSessionId($body));
+        } catch (Throwable $throwable) {
+            Log::warning('Langfuse trace context resolution failed', ['message' => $throwable->getMessage()]);
+
+            return $body;
+        }
+    }
+
+    private function resolveDefaultUserId(TraceBody $body): ?string
+    {
+        if (! $this->config->userTracingEnabled || $body->userId !== null) {
+            return null;
+        }
+
+        return $this->contextResolver->resolveUserId();
+    }
+
+    private function resolveDefaultSessionId(TraceBody $body): ?string
+    {
+        if (! $this->config->sessionTracingEnabled || $body->sessionId !== null) {
+            return null;
+        }
+
+        return $this->contextResolver->resolveSessionId();
+    }
+
+    public function currentTrace(): LangfuseTrace
+    {
+        return $this->currentTrace;
+    }
+
+    public function setCurrentTrace(LangfuseTrace $trace): void
+    {
+        $this->currentTrace = $trace;
+    }
+
+    public function score(ScoreBody $body, ?string $timestamp = null): void
+    {
+        $this->batcher->enqueueScore($body->withEnvironment($this->config->environment), $timestamp);
+    }
+
+    public function getScore(string $scoreId): ?ScoreResponse
+    {
+        return $this->scoreApiClient->get($scoreId);
+    }
+
+    public function getScores(?ScoreQuery $query = null): ?ScoreListResponse
+    {
+        return $this->scoreApiClient->getMany($query);
+    }
+
+    public function deleteScore(string $scoreId): bool
+    {
+        return $this->scoreApiClient->delete($scoreId);
+    }
+
+    public function getObservation(
+        string $observationId,
+        ?string $fromStartTime = null,
+        ?string $toStartTime = null,
+        ?string $fields = null,
+    ): ?ObservationResponse {
+        return $this->observationApiClient->get($observationId, $fromStartTime, $toStartTime, $fields);
+    }
+
+    public function getObservations(?ObservationQuery $query = null): ?ObservationListResponse
+    {
+        return $this->observationApiClient->getMany($query);
+    }
+
+    public function queryMetrics(MetricQuery $query): ?MetricsResponse
+    {
+        return $this->metricsApiClient->query($query);
+    }
+
+    public function getDataset(string $datasetName): ?DatasetResponse
+    {
+        return $this->datasetApiClient->get($datasetName);
+    }
+
+    public function listDatasets(?int $page = null, ?int $limit = null): ?DatasetListResponse
+    {
+        return $this->datasetApiClient->list($page, $limit);
+    }
+
+    public function createDataset(CreateDatasetBody $body): ?DatasetResponse
+    {
+        return $this->datasetApiClient->create($body);
+    }
+
+    public function getDatasetItem(string $id): ?DatasetItemResponse
+    {
+        return $this->datasetItemApiClient->get($id);
+    }
+
+    public function listDatasetItems(?DatasetItemQuery $query = null): ?DatasetItemListResponse
+    {
+        return $this->datasetItemApiClient->list($query);
+    }
+
+    public function createDatasetItem(CreateDatasetItemBody $body): ?DatasetItemResponse
+    {
+        return $this->datasetItemApiClient->create($body);
+    }
+
+    public function deleteDatasetItem(string $id): bool
+    {
+        return $this->datasetItemApiClient->delete($id);
+    }
+
+    public function listExperiments(ExperimentQuery $query): ?ExperimentListResponse
+    {
+        return $this->experimentApiClient->listExperiments($query);
+    }
+
+    public function listExperimentItems(ExperimentItemQuery $query): ?ExperimentItemListResponse
+    {
+        return $this->experimentApiClient->listExperimentItems($query);
+    }
+
+    public function getExperiment(string $experimentId, string $fromStartTime, ?string $toStartTime = null): ?ExperimentResponse
+    {
+        return $this->experimentApiClient->getExperiment($experimentId, $fromStartTime, $toStartTime);
+    }
+
+    public function flush(): void
+    {
+        $this->batcher->flush();
+    }
+
+    public function shutdown(): void
+    {
+        $this->registry->endAll();
+        $this->batcher->flush();
+
+        // The unit of work is over: drop the references so a long-running process
+        // that shuts down repeatedly does not accumulate them.
+        $this->registry->reset();
+    }
+
+    public function isEnabled(): bool
+    {
+        return $this->config->enabled;
+    }
+
+    public function prompt(
+        string $name,
+        ?int $version = null,
+        ?string $label = null,
+        string|array|null $fallback = null,
+    ): PromptInterface {
+        $prompt = $this->promptManager->get($name, $version, $label, $fallback);
+
+        $this->promptRegistry->set($prompt);
+
+        return $prompt;
+    }
+
+    public function createPrompt(CreatePromptBody $body): ?PromptInterface
+    {
+        return $this->promptApiClient->create($body);
+    }
+
+    public function listPrompts(?string $name = null, ?string $label = null, ?int $page = null, ?int $limit = null): ?PromptListResponse
+    {
+        return $this->promptApiClient->list($name, $label, $page, $limit);
+    }
+}

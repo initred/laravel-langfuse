@@ -1,0 +1,183 @@
+<?php
+
+declare(strict_types=1);
+
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Initred\Langfuse\Api\IngestionApiClient;
+use Initred\Langfuse\Config\LangfuseConfig;
+use Initred\Langfuse\Dto\IngestionBatch;
+use Initred\Langfuse\Dto\IngestionEvent;
+use Initred\Langfuse\Dto\IngestionResponse;
+use Initred\Langfuse\Dto\ScoreBody;
+use Initred\Langfuse\Enums\EventType;
+
+beforeEach(function () {
+    $this->config = new LangfuseConfig(
+        publicKey: 'pk-test',
+        secretKey: 'sk-test',
+        baseUrl: 'https://cloud.langfuse.com',
+    );
+    $this->client = new IngestionApiClient($this->config);
+});
+
+it('sends batch to correct url with auth headers', function () {
+    Http::fake([
+        'cloud.langfuse.com/api/public/ingestion' => Http::response([
+            'successes' => [['id' => 'evt-1', 'status' => 201]],
+            'errors' => [],
+        ]),
+    ]);
+
+    $batch = new IngestionBatch(batch: [
+        new IngestionEvent(
+            id: 'evt-1',
+            type: EventType::ScoreCreate,
+            timestamp: '2024-01-01T00:00:00Z',
+            body: new ScoreBody(name: 'accuracy', id: 'score-1', value: 1.0),
+        ),
+    ]);
+
+    $response = $this->client->send($batch);
+
+    Http::assertSent(function ($request) {
+        return $request->url() === 'https://cloud.langfuse.com/api/public/ingestion'
+            && $request->hasHeader('Authorization', $this->config->authHeader())
+            && $request->hasHeader('Content-Type', 'application/json')
+            && isset($request->data()['batch'])
+            && count($request->data()['batch']) === 1;
+    });
+
+    expect($response)->toBeInstanceOf(IngestionResponse::class)
+        ->and($response->successes)->toHaveCount(1)
+        ->and($response->errors)->toHaveCount(0);
+});
+
+it('returns null on http error without throwing', function () {
+    Http::fake([
+        'cloud.langfuse.com/api/public/ingestion' => Http::response('Server Error', 500),
+    ]);
+
+    Log::shouldReceive('warning')
+        ->once()
+        ->with('Langfuse ingestion failed', Mockery::type('array'));
+
+    $batch = new IngestionBatch(batch: []);
+
+    $response = $this->client->send($batch);
+
+    expect($response)->toBeNull();
+});
+
+it('returns null on connection exception without throwing', function () {
+    Http::fake(function () {
+        throw new ConnectionException('DNS resolution failed');
+    });
+
+    Log::shouldReceive('warning')
+        ->once()
+        ->with('Langfuse ingestion error', Mockery::type('array'));
+
+    $batch = new IngestionBatch(batch: []);
+
+    $response = $this->client->send($batch);
+
+    expect($response)->toBeNull();
+});
+
+it('parses response with errors and logs them', function () {
+    Http::fake([
+        'cloud.langfuse.com/api/public/ingestion' => Http::response([
+            'successes' => [['id' => 'evt-1', 'status' => 201]],
+            'errors' => [['id' => 'evt-2', 'status' => 400, 'message' => 'Invalid']],
+        ]),
+    ]);
+
+    Log::shouldReceive('warning')
+        ->once()
+        ->with('Langfuse ingestion event error', Mockery::on(function (array $context) {
+            return $context['id'] === 'evt-2'
+                && $context['status'] === 400
+                && $context['message'] === 'Invalid';
+        }));
+
+    $batch = new IngestionBatch(batch: []);
+
+    $response = $this->client->send($batch);
+
+    expect($response)->toBeInstanceOf(IngestionResponse::class)
+        ->and($response->hasErrors())->toBeTrue()
+        ->and($response->errors[0]->message)->toBe('Invalid');
+});
+
+it('sends correct payload structure', function () {
+    Http::fake([
+        'cloud.langfuse.com/api/public/ingestion' => Http::response([
+            'successes' => [],
+            'errors' => [],
+        ]),
+    ]);
+
+    $batch = new IngestionBatch(
+        batch: [
+            new IngestionEvent(
+                id: 'evt-1',
+                type: EventType::ScoreCreate,
+                timestamp: '2024-01-01T00:00:00Z',
+                body: new ScoreBody(name: 'accuracy', id: 'score-1', value: 1.0),
+            ),
+        ],
+        metadata: ['sdk_version' => '1.0.0'],
+    );
+
+    $this->client->send($batch);
+
+    Http::assertSent(function ($request) {
+        $data = $request->data();
+
+        return $data['batch'][0]['id'] === 'evt-1'
+            && $data['batch'][0]['type'] === 'score-create'
+            && $data['batch'][0]['body']['id'] === 'score-1';
+    });
+});
+
+it('sends raw payload via sendRaw', function () {
+    Http::fake([
+        'cloud.langfuse.com/api/public/ingestion' => Http::response([
+            'successes' => [['id' => 'evt-1', 'status' => 201]],
+            'errors' => [],
+        ]),
+    ]);
+
+    $payload = [
+        'batch' => [['id' => 'evt-1', 'type' => 'score-create', 'timestamp' => '2024-01-01T00:00:00Z', 'body' => ['id' => 'score-1']]],
+        'metadata' => (object) ['sdk_name' => 'langfuse-php'],
+    ];
+
+    $response = $this->client->sendRaw($payload);
+
+    Http::assertSent(function ($request) {
+        return $request->url() === 'https://cloud.langfuse.com/api/public/ingestion'
+            && $request->hasHeader('Authorization', $this->config->authHeader())
+            && isset($request->data()['batch'])
+            && count($request->data()['batch']) === 1;
+    });
+
+    expect($response)->toBeInstanceOf(IngestionResponse::class)
+        ->and($response->successes)->toHaveCount(1);
+});
+
+it('sendRaw returns null on connection exception without throwing', function () {
+    Http::fake(function () {
+        throw new ConnectionException('Connection refused');
+    });
+
+    Log::shouldReceive('warning')
+        ->once()
+        ->with('Langfuse ingestion error', Mockery::type('array'));
+
+    $response = $this->client->sendRaw(['batch' => []]);
+
+    expect($response)->toBeNull();
+});

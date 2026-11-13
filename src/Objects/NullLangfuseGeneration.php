@@ -1,0 +1,44 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Initred\Langfuse\Objects;
+
+use Initred\Langfuse\Dto\GenerationBody;
+use Initred\Langfuse\Dto\Usage;
+use Initred\Langfuse\Enums\ObservationLevel;
+
+class NullLangfuseGeneration extends LangfuseGeneration
+{
+    public function __construct() {}
+
+    public function getId(): string
+    {
+        return '';
+    }
+
+    public function getTraceId(): ?string
+    {
+        return null;
+    }
+
+    public function getBody(): GenerationBody
+    {
+        return new GenerationBody;
+    }
+
+    public function hasEnded(): bool
+    {
+        return true;
+    }
+
+    public function end(
+        ?string $endTime = null,
+        mixed $output = null,
+        ?Usage $usage = null,
+        ?string $statusMessage = null,
+        ?ObservationLevel $level = null,
+    ): void {}
+
+    public function endOnShutdown(): void {}
+}

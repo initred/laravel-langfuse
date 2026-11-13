@@ -1,0 +1,8 @@
+parameters:
+    configDirectories:
+        - %currentWorkingDirectory%/config
+    level: max
+    paths:
+        - src
+        - config
+    tmpDir: build/phpstan
