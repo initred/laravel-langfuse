@@ -30,12 +30,12 @@
         "laravel/pint": "^1.32.3",
         "neuron-core/neuron-ai": "^4.1.18",
         "orchestra/testbench": "^11.3",
-        "paragonie/random_compat": "^9.99.100",
         "pestphp/pest": "^5.3.5",
         "pestphp/pest-plugin-laravel": "^5.0.1",
         "pestphp/pest-plugin-type-coverage": "^5.1",
         "phpdocumentor/reflection-docblock": "^5.6.3|^6.0",
-        "phpstan/extension-installer": "^1.4.3"
+        "phpstan/extension-installer": "^1.4.3",
+        "symfony/polyfill-uuid": "^1.20"
     },
     "conflict": {
         "neuron-core/neuron-ai": ">=4.0 <4.1.18"
