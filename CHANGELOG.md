@@ -5,6 +5,29 @@ All notable changes to `initred/laravel-langfuse` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] - 2026-11-23
+
+### Fixed
+
+- **Laravel AI tool failures** - a tool that throws sends `ToolFailed` instead of
+  `ToolInvoked`, and since `laravel/ai` 1.4.1 so does a sub-agent run as a tool. Its
+  span was never ended, so it was not sent to Langfuse and stayed in memory. It is
+  now ended at the `ERROR` level with the exception message.
+- **Laravel AI run failures** - when a run failed for good (`AgentFailed`), the
+  trace the integration created was never ended and stayed the current trace, so
+  the next run in the same process (Octane, a queue worker) was recorded on it. The
+  failed run now records an `ERROR` generation, adds the message to the trace
+  metadata as `error`, ends the trace and resets the current trace. A trace adopted
+  from `LangfuseMiddleware` or `setCurrentTrace()` is still left open for its owner.
+
+### Changed
+
+- **Development dependencies** - tested against `laravel/ai` 1.4.1. With 1.4.1 the
+  generation output of a `prompt()` call holds the text of every step, so an answer
+  given in the same step as a tool call is no longer recorded as empty.
+- **Development dependencies** - `phpstan/phpstan` is held at 2.3.5 until
+  `pestphp/pest-plugin-type-coverage` supports 2.3.6. No runtime changes.
+
 ## [1.0.2] - 2026-11-16
 
 ### Changed
