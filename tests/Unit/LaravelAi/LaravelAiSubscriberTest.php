@@ -16,6 +16,7 @@ use Initred\Langfuse\Objects\LangfuseTrace;
 use Initred\Langfuse\Objects\NullLangfuseTrace;
 use Initred\Langfuse\Prompt\CurrentPromptRegistry;
 use Initred\Langfuse\Testing\LangfuseFake;
+use Laravel\Ai\Agents\ConversationTitleAgent;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Contracts\RemembersConversations;
@@ -217,6 +218,60 @@ it('captures model name from response meta', function () {
     ));
 
     expect(generationBodies($fake)[0]['model'])->toBe('gpt-4-turbo');
+});
+
+it('records the agent class in the generation metadata', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+
+    runAgentInvocation($subscriber, 'inv-1');
+
+    expect(generationBodies($fake)[0]['metadata'])->toBe(['agent' => TestAgent::class]);
+});
+
+it('names the conversation title generation apart from the run it titles', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+    $prompt = makeAgentPrompt();
+    $titlePrompt = makeAgentPrompt('gpt-4-mini', new ConversationTitleAgent);
+
+    $subscriber->handlePromptingAgent(new PromptingAgent(invocationId: 'outer', prompt: $prompt));
+
+    // laravel/ai titles a new conversation while the run is still open.
+    $subscriber->handlePromptingAgent(new PromptingAgent(invocationId: 'title', prompt: $titlePrompt));
+    $subscriber->handleAgentPrompted(new AgentPrompted(
+        invocationId: 'title',
+        prompt: $titlePrompt,
+        response: makeAgentResponse(invocationId: 'title', text: 'Joke request', model: 'gpt-4-mini'),
+    ));
+
+    $subscriber->handleAgentPrompted(new AgentPrompted(
+        invocationId: 'outer',
+        prompt: $prompt,
+        response: makeAgentResponse(invocationId: 'outer'),
+    ));
+
+    [$title, $answer] = generationBodies($fake);
+
+    expect($fake->traces())->toHaveCount(1)
+        ->and($title['name'])->toBe('conversation-title')
+        ->and($title['model'])->toBe('gpt-4-mini')
+        ->and($title['metadata'])->toBe(['agent' => ConversationTitleAgent::class])
+        ->and($answer['name'])->toBe('gpt-4');
+});
+
+it('names a failed conversation title generation apart as well', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+    $titlePrompt = makeAgentPrompt('gpt-4-mini', new ConversationTitleAgent);
+
+    $subscriber->handleAgentFailed(new AgentFailed(
+        invocationId: 'title',
+        prompt: $titlePrompt,
+        exception: new RuntimeException('Provider is down'),
+    ));
+
+    expect(generationBodies($fake)[0]['name'])->toBe('conversation-title');
 });
 
 it('creates trace with agent class name', function () {

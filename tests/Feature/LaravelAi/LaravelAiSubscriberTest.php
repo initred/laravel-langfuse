@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\GenericUser;
 use Initred\Langfuse\Config\LangfuseConfig;
 use Initred\Langfuse\Contracts\EventBatcherInterface;
 use Initred\Langfuse\Contracts\LangfuseClientInterface;
@@ -11,6 +12,7 @@ use Initred\Langfuse\LaravelAi\LaravelAiSubscriber;
 use Initred\Langfuse\Prompt\PromptManager;
 use Initred\Langfuse\Testing\RecordingEventBatcher;
 use Initred\Langfuse\Tracing\CompletedObservation;
+use Laravel\Ai\AiServiceProvider;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Events\AgentPrompted;
 use Laravel\Ai\Events\InvokingTool;
@@ -20,6 +22,7 @@ use Laravel\Ai\Prompts\AgentPrompt;
 use Laravel\Ai\Responses\AgentResponse;
 use Laravel\Ai\Responses\Data\Meta;
 use Laravel\Ai\Responses\Data\TextUsage;
+use Tests\Fixtures\LaravelAi\RememberingTestAgent;
 use Tests\Fixtures\LaravelAi\TestAgent;
 use Tests\Fixtures\LaravelAi\TestTool;
 
@@ -168,3 +171,46 @@ it('dispatches tool events through subscriber', function () {
         ->and($spans[0]->name())->toStartWith('tool-')
         ->and($spans[0]->body->output)->toBe('Search results here');
 });
+
+it('records the title of a new conversation on the trace of the run it titles', function (bool $streamed) {
+    $this->app->register(AiServiceProvider::class);
+    config([
+        'database.default' => 'testing',
+        'database.connections.testing' => ['driver' => 'sqlite', 'database' => ':memory:'],
+        'langfuse.laravel_ai_enabled' => true,
+        'langfuse.public_key' => 'pk-test',
+        'langfuse.secret_key' => 'sk-test',
+    ]);
+    $this->loadMigrationsFrom(dirname((new ReflectionClass(AiServiceProvider::class))->getFileName(), 2).'/database/migrations');
+    $this->artisan('migrate')->run();
+
+    // Re-bootstrap
+    $this->app->forgetInstance(LangfuseConfig::class);
+    $this->app->forgetInstance(LangfuseClientInterface::class);
+    $this->app->forgetInstance(EventBatcherInterface::class);
+    $this->app->forgetInstance(PromptManager::class);
+
+    $provider = new LangfuseServiceProvider($this->app);
+    $provider->register();
+
+    $batcher = new RecordingEventBatcher;
+    $this->app->instance(EventBatcherInterface::class, $batcher);
+
+    $provider->boot();
+
+    RememberingTestAgent::fake(['the answer']);
+
+    $agent = (new RememberingTestAgent)->forUser(new GenericUser(['id' => 7]));
+
+    $streamed
+        ? $agent->stream('Hello there')->each(fn () => null)
+        : $agent->prompt('Hello there');
+
+    $generations = $batcher->observationsOfType(ObservationType::Generation);
+    $traceIds = array_unique(array_map(fn (CompletedObservation $o): ?string => $o->body->traceId, $generations));
+
+    expect(array_map(fn (CompletedObservation $o): string => $o->name(), $generations))
+        ->toContain('conversation-title')
+        ->and($generations)->toHaveCount(2)
+        ->and($traceIds)->toHaveCount(1);
+})->with(['prompted' => false, 'streamed' => true]);

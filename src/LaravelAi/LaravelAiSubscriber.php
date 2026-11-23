@@ -20,6 +20,7 @@ use Initred\Langfuse\Objects\LangfuseSpan;
 use Initred\Langfuse\Objects\LangfuseTrace;
 use Initred\Langfuse\Objects\NullLangfuseTrace;
 use Initred\Langfuse\Prompt\CurrentPromptRegistry;
+use Laravel\Ai\Agents\ConversationTitleAgent;
 use Laravel\Ai\Events\AgentFailed;
 use Laravel\Ai\Events\AgentPrompted;
 use Laravel\Ai\Events\AgentStreamed;
@@ -97,14 +98,9 @@ class LaravelAiSubscriber
 
         $trace = $this->resolveTrace($event->invocationId, fn (): TraceBody => $this->traceBodyFor($event));
 
-        $body = new GenerationBody(
-            name: $event->prompt->model,
-            model: $event->prompt->model,
-            input: $event->prompt->prompt,
-            startTime: $this->formatTime($startTime),
-        );
+        $body = $this->generationBodyFor($event, $event->prompt->model, $startTime);
 
-        $trace->generation($body->withPrompt($this->managedPrompts[$event->invocationId] ?? null))->end(
+        $trace->generation($body)->end(
             endTime: $this->formatTime(microtime(true)),
             statusMessage: $event->exception->getMessage(),
             level: ObservationLevel::ERROR,
@@ -125,21 +121,33 @@ class LaravelAiSubscriber
         );
     }
 
+    /**
+     * A generation is named after its model, except the one laravel/ai runs to title
+     * a new conversation: it lands on the same trace as the run it titles, with the
+     * same input, so it is named `conversation-title` to tell the two apart. The
+     * agent class is kept in the metadata of every generation.
+     */
+    private function generationBodyFor(AgentPrompted|AgentFailed $event, string $model, float $startTime): GenerationBody
+    {
+        $agent = $event->prompt->agent;
+
+        $body = new GenerationBody(
+            name: $agent instanceof ConversationTitleAgent ? 'conversation-title' : $model,
+            model: $model,
+            input: $event->prompt->prompt,
+            startTime: $this->formatTime($startTime),
+            metadata: ['agent' => $agent::class],
+        );
+
+        return $body->withPrompt($this->managedPrompts[$event->invocationId] ?? null);
+    }
+
     private function recordGeneration(LangfuseTrace $trace, AgentPrompted $event, float $startTime, float $endTime): void
     {
         $response = $event->response;
         $model = $response->meta->model ?? $event->prompt->model;
 
-        $body = new GenerationBody(
-            name: $model,
-            model: $model,
-            input: $event->prompt->prompt,
-            startTime: $this->formatTime($startTime),
-        );
-
-        $generation = $trace->generation(
-            $body->withPrompt($this->managedPrompts[$event->invocationId] ?? null),
-        );
+        $generation = $trace->generation($this->generationBodyFor($event, $model, $startTime));
 
         $generation->end(
             endTime: $this->formatTime($endTime),

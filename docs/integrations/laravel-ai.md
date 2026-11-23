@@ -18,7 +18,8 @@ Token usage is sent the way Langfuse prices it, with every token counted in exac
 
 The SDK listens to Laravel AI's event system:
 
-- **Agent prompts** - each `prompt()` or `stream()` call creates a trace and generation with model name, token usage, input, and output
+- **Agent prompts** - each `prompt()` or `stream()` call creates a trace and generation with model name, token usage, input, and output. The generation is named after the model and records the agent class in its metadata as `agent`
+- **Conversation titles** - when an agent that remembers conversations starts a new conversation, Laravel AI asks the cheapest model for a title. That call lands on the same trace as the run it titles, as a generation named `conversation-title`. Set `ai.conversations.generate_title` to `false` in Laravel AI's config to skip the call
 - **Tool invocations** - each tool call creates a span under the agent's trace with arguments and results, marked with the `tool` observation type
 - **Failures** - a tool that throws, including a sub-agent run as a tool, ends its span at the `ERROR` level with the exception message. A run that fails for good records its generation at the `ERROR` level and adds the message to the trace metadata as `error`
 
