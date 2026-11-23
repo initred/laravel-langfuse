@@ -19,11 +19,13 @@ use Initred\Langfuse\Testing\LangfuseFake;
 use Laravel\Ai\Contracts\Agent;
 use Laravel\Ai\Contracts\Providers\TextProvider;
 use Laravel\Ai\Contracts\RemembersConversations;
+use Laravel\Ai\Events\AgentFailed;
 use Laravel\Ai\Events\AgentPrompted;
 use Laravel\Ai\Events\AgentStreamed;
 use Laravel\Ai\Events\InvokingTool;
 use Laravel\Ai\Events\PromptingAgent;
 use Laravel\Ai\Events\StreamingAgent;
+use Laravel\Ai\Events\ToolFailed;
 use Laravel\Ai\Events\ToolInvoked;
 use Laravel\Ai\Promptable;
 use Laravel\Ai\Prompts\AgentPrompt;
@@ -144,8 +146,10 @@ it('registers correct event mappings in subscribe', function () {
         StreamingAgent::class => 'handlePromptingAgent',
         AgentPrompted::class => 'handleAgentPrompted',
         AgentStreamed::class => 'handleAgentPrompted',
+        AgentFailed::class => 'handleAgentFailed',
         InvokingTool::class => 'handleInvokingTool',
         ToolInvoked::class => 'handleToolInvoked',
+        ToolFailed::class => 'handleToolFailed',
     ]);
 });
 
@@ -275,6 +279,117 @@ it('creates and ends a span for a tool invocation', function () {
         ->and($body['output'])->toBe('Tool result')
         ->and($body['type'])->toBe('tool')
         ->and($fake->spans()[0]->hasEnded())->toBeTrue();
+});
+
+it('ends a failed tool span as an error', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+    $agent = makeTestAgent();
+    $tool = makeTestTool();
+
+    $subscriber->handlePromptingAgent(new PromptingAgent(invocationId: 'inv-1', prompt: makeAgentPrompt()));
+    $subscriber->handleInvokingTool(new InvokingTool(
+        invocationId: 'inv-1',
+        toolInvocationId: 'tool-inv-1',
+        agent: $agent,
+        tool: $tool,
+        arguments: ['query' => 'test'],
+    ));
+    $subscriber->handleToolFailed(new ToolFailed(
+        invocationId: 'inv-1',
+        toolInvocationId: 'tool-inv-1',
+        agent: $agent,
+        tool: $tool,
+        arguments: ['query' => 'test'],
+        exception: new RuntimeException('Tool exploded'),
+        time: 0.0,
+    ));
+
+    $body = spanBodies($fake)[0];
+
+    expect($fake->spans()[0]->hasEnded())->toBeTrue()
+        ->and($body['level'])->toBe('ERROR')
+        ->and($body['statusMessage'])->toBe('Tool exploded');
+});
+
+it('ignores a tool failure without a prior invoking tool', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+
+    $subscriber->handleToolFailed(new ToolFailed(
+        invocationId: 'inv-1',
+        toolInvocationId: 'tool-inv-1',
+        agent: makeTestAgent(),
+        tool: makeTestTool(),
+        arguments: [],
+        exception: new RuntimeException('Tool exploded'),
+        time: 0.0,
+    ));
+
+    expect($fake->spans())->toBeEmpty();
+});
+
+it('records a failed run as an error generation and ends the owned trace', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+    $prompt = makeAgentPrompt('gpt-4');
+
+    $subscriber->handlePromptingAgent(new PromptingAgent(invocationId: 'inv-1', prompt: $prompt));
+    $subscriber->handleAgentFailed(new AgentFailed(
+        invocationId: 'inv-1',
+        prompt: $prompt,
+        exception: new RuntimeException('Provider is down'),
+    ));
+
+    $generation = generationBodies($fake)[0];
+
+    expect($generation['model'])->toBe('gpt-4')
+        ->and($generation['input'])->toBe('Tell me a joke')
+        ->and($generation['level'])->toBe('ERROR')
+        ->and($generation['statusMessage'])->toBe('Provider is down')
+        ->and($fake->generations()[0]->hasEnded())->toBeTrue()
+        ->and($fake->traces()[0]->hasEnded())->toBeTrue()
+        ->and(traceBodies($fake)[0]['metadata']['error'])->toBe('Provider is down')
+        ->and($fake->currentTrace())->toBeInstanceOf(NullLangfuseTrace::class);
+});
+
+it('starts a new trace for the run after a failed one', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+    $prompt = makeAgentPrompt();
+
+    $subscriber->handlePromptingAgent(new PromptingAgent(invocationId: 'inv-1', prompt: $prompt));
+    $subscriber->handleAgentFailed(new AgentFailed(
+        invocationId: 'inv-1',
+        prompt: $prompt,
+        exception: new RuntimeException('Provider is down'),
+    ));
+
+    runAgentInvocation($subscriber, 'inv-2');
+
+    expect($fake->traces())->toHaveCount(2)
+        ->and($fake->generations()[1]->getBody()->traceId)->toBe($fake->traces()[1]->getId());
+});
+
+it('leaves an adopted trace open when a run fails', function () {
+    $fake = makeLangfuseClient();
+    $subscriber = makeSubscriber($fake);
+    $prompt = makeAgentPrompt();
+
+    $trace = $fake->trace(new TraceBody(id: 'workflow', name: 'GET /chat'));
+    $fake->setCurrentTrace($trace);
+
+    $subscriber->handlePromptingAgent(new PromptingAgent(invocationId: 'inv-1', prompt: $prompt));
+    $subscriber->handleAgentFailed(new AgentFailed(
+        invocationId: 'inv-1',
+        prompt: $prompt,
+        exception: new RuntimeException('Provider is down'),
+    ));
+
+    expect($trace->hasEnded())->toBeFalse()
+        ->and($fake->currentTrace())->toBe($trace)
+        ->and(traceBodies($fake)[0]['metadata'] ?? [])->not->toHaveKey('error')
+        ->and(generationBodies($fake)[0]['level'])->toBe('ERROR');
 });
 
 it('ends the owned trace, so the next invocation starts a new one', function () {

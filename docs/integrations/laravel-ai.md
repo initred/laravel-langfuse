@@ -20,6 +20,7 @@ The SDK listens to Laravel AI's event system:
 
 - **Agent prompts** - each `prompt()` or `stream()` call creates a trace and generation with model name, token usage, input, and output
 - **Tool invocations** - each tool call creates a span under the agent's trace with arguments and results, marked with the `tool` observation type
+- **Failures** - a tool that throws, including a sub-agent run as a tool, ends its span at the `ERROR` level with the exception message. A run that fails for good records its generation at the `ERROR` level and adds the message to the trace metadata as `error`
 
 ## Users and sessions
 
@@ -47,7 +48,7 @@ Set `LANGFUSE_SESSION_TRACING=false` or `LANGFUSE_USER_TRACING=false` to stop fo
 An observation is only sent when it ends, so the integration ends what it creates:
 
 - The generation and every tool span end as soon as their event fires.
-- A trace the integration created itself is ended when the invocation completes, and the current trace is reset, so the next invocation starts a fresh trace.
+- A trace the integration created itself is ended when the invocation completes or fails, and the current trace is reset, so the next invocation starts a fresh trace.
 - A trace it adopted - from `LangfuseMiddleware` or from your own `setCurrentTrace()` - is never ended by the integration. It stays open for its owner, who ends it or relies on the application shutdown hook.
 
 ## Request grouping

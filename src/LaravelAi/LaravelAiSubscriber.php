@@ -14,16 +14,19 @@ use Initred\Langfuse\Dto\GenerationBody;
 use Initred\Langfuse\Dto\SpanBody;
 use Initred\Langfuse\Dto\TraceBody;
 use Initred\Langfuse\Dto\Usage;
+use Initred\Langfuse\Enums\ObservationLevel;
 use Initred\Langfuse\Enums\ObservationType;
 use Initred\Langfuse\Objects\LangfuseSpan;
 use Initred\Langfuse\Objects\LangfuseTrace;
 use Initred\Langfuse\Objects\NullLangfuseTrace;
 use Initred\Langfuse\Prompt\CurrentPromptRegistry;
+use Laravel\Ai\Events\AgentFailed;
 use Laravel\Ai\Events\AgentPrompted;
 use Laravel\Ai\Events\AgentStreamed;
 use Laravel\Ai\Events\InvokingTool;
 use Laravel\Ai\Events\PromptingAgent;
 use Laravel\Ai\Events\StreamingAgent;
+use Laravel\Ai\Events\ToolFailed;
 use Laravel\Ai\Events\ToolInvoked;
 use Laravel\Ai\Responses\Data\TextUsage;
 
@@ -79,6 +82,47 @@ class LaravelAiSubscriber
         $this->completeTrace($trace, $event);
 
         unset($this->startTimes[$event->invocationId], $this->managedPrompts[$event->invocationId]);
+    }
+
+    /**
+     * A run that failed for good still gets its generation, marked as an error, and
+     * the trace this subscriber created is ended. Otherwise it would stay the current
+     * trace, and the next run in a long-lived process (Octane, a queue worker) would
+     * be recorded on it. laravel/ai sends no `AgentFailed` while a failover provider
+     * may still retry the run.
+     */
+    public function handleAgentFailed(AgentFailed $event): void
+    {
+        $startTime = $this->startTimes[$event->invocationId] ?? microtime(true);
+
+        $trace = $this->resolveTrace($event->invocationId, fn (): TraceBody => $this->traceBodyFor($event));
+
+        $body = new GenerationBody(
+            name: $event->prompt->model,
+            model: $event->prompt->model,
+            input: $event->prompt->prompt,
+            startTime: $this->formatTime($startTime),
+        );
+
+        $trace->generation($body->withPrompt($this->managedPrompts[$event->invocationId] ?? null))->end(
+            endTime: $this->formatTime(microtime(true)),
+            statusMessage: $event->exception->getMessage(),
+            level: ObservationLevel::ERROR,
+        );
+
+        if (isset($this->ownedInvocations[$event->invocationId])) {
+            $trace->update(new TraceBody(metadata: ['error' => $event->exception->getMessage()]));
+            $trace->end();
+
+            $this->langfuse->setCurrentTrace(new NullLangfuseTrace);
+        }
+
+        unset(
+            $this->startTimes[$event->invocationId],
+            $this->managedPrompts[$event->invocationId],
+            $this->traces[$event->invocationId],
+            $this->ownedInvocations[$event->invocationId],
+        );
     }
 
     private function recordGeneration(LangfuseTrace $trace, AgentPrompted $event, float $startTime, float $endTime): void
@@ -141,6 +185,28 @@ class LaravelAiSubscriber
     }
 
     /**
+     * A tool that throws sends `ToolFailed` instead of `ToolInvoked`, as does a
+     * sub-agent that throws since laravel/ai 1.4.1. The span is ended as an error so
+     * it is still exported and not kept open.
+     */
+    public function handleToolFailed(ToolFailed $event): void
+    {
+        $span = $this->toolSpans[$event->toolInvocationId] ?? null;
+
+        if ($span === null) {
+            return;
+        }
+
+        $span->end(
+            endTime: $this->formatTime(microtime(true)),
+            statusMessage: $event->exception->getMessage(),
+            level: ObservationLevel::ERROR,
+        );
+
+        unset($this->toolSpans[$event->toolInvocationId], $this->toolStartTimes[$event->toolInvocationId]);
+    }
+
+    /**
      * @return array<string, string>
      */
     public function subscribe(): array
@@ -150,12 +216,14 @@ class LaravelAiSubscriber
             StreamingAgent::class => 'handlePromptingAgent',
             AgentPrompted::class => 'handleAgentPrompted',
             AgentStreamed::class => 'handleAgentPrompted',
+            AgentFailed::class => 'handleAgentFailed',
             InvokingTool::class => 'handleInvokingTool',
             ToolInvoked::class => 'handleToolInvoked',
+            ToolFailed::class => 'handleToolFailed',
         ];
     }
 
-    private function traceBodyFor(PromptingAgent|AgentPrompted $event): TraceBody
+    private function traceBodyFor(PromptingAgent|AgentPrompted|AgentFailed $event): TraceBody
     {
         $context = $this->contextFor($event->prompt->agent);
 
