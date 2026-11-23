@@ -5,6 +5,17 @@ All notable changes to `initred/laravel-langfuse` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-23
+
+### Changed
+
+- **Laravel AI conversation titles** - the call Laravel AI makes to title a new
+  conversation lands on the same trace as the run it titles, with the same input,
+  and was named after its model like the run's own generation. It is now named
+  `conversation-title`.
+- **Laravel AI generation metadata** - every generation records the agent class
+  as `agent` in its metadata.
+
 ## [1.0.3] - 2026-11-23
 
 ### Fixed

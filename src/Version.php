@@ -16,5 +16,5 @@ final class Version
 
     public const string SDK_LANGUAGE = 'php';
 
-    public const string SDK_VERSION = '1.0.3';
+    public const string SDK_VERSION = '1.1.0';
 }
