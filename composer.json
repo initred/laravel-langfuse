@@ -25,7 +25,7 @@
     },
     "require-dev": {
         "larastan/larastan": "^3.15",
-        "laravel/ai": "^1.4",
+        "laravel/ai": "^1.4.1",
         "laravel/pao": "^1.1.5",
         "laravel/pint": "^1.32.3",
         "neuron-core/neuron-ai": "^4.1.18",
