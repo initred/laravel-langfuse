@@ -35,7 +35,7 @@
         "pestphp/pest-plugin-type-coverage": "^5.1",
         "phpdocumentor/reflection-docblock": "^5.6.3|^6.0",
         "phpstan/extension-installer": "^1.4.3",
-        "phpstan/phpstan": ">=2.3.5 <2.3.6",
+        "phpstan/phpstan": ">=2.3.5 <2.3.8",
         "symfony/polyfill-uuid": "^1.20"
     },
     "conflict": {
